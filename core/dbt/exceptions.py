@@ -2136,7 +2136,11 @@ class ContractError(CompilationError):
             "Please ensure the name, data_type, and number of columns in your `yml` file "
             "match the columns in your SQL file.\n"
             # separate column headers by 20 spaces
+<<<<<<< HEAD
             f"{'sql col:' : <20} {'yaml col:' : <20} {'issue:' : <20}\n"
+=======
+            f"{'yaml col:' : <20} {'sql col:' : <20} {'issue:' : <20}\n"
+>>>>>>> 86a614f034bb7e9985ad3d398a84bc3b4b8ce45b
         )
 
         # list of ordered matches (or not matches) for printing
