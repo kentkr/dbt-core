@@ -52,9 +52,9 @@ class Graph:
             ),
         )
 
-    def select_childrens_parents(self, selected: Set[UniqueId]) -> Set[UniqueId]:
+    def select_childrens_parents(self, selected: Set[UniqueId], max_depth: Optional[int] = None) -> Set[UniqueId]:
         ancestors_for = self.select_children(selected) | selected
-        return self.select_parents(ancestors_for) | ancestors_for
+        return self.select_parents(ancestors_for, max_depth) | ancestors_for
 
     def select_children(
         self, selected: Set[UniqueId], max_depth: Optional[int] = None
