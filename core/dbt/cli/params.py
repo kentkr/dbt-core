@@ -40,10 +40,18 @@ compile_docs = click.option(
     default=True,
 )
 
+compile_inject_ephemeral_ctes = click.option(
+    "--inject-ephemeral-ctes/--no-inject-ephemeral-ctes",
+    envvar=None,
+    help="Internal flag controlling injection of referenced ephemeral models' CTEs during `compile`.",
+    hidden=True,
+    default=True,
+)
+
 config_dir = click.option(
     "--config-dir",
     envvar=None,
-    help="Show the configured location for the profiles.yml file and exit",
+    help="Print a system-specific command to access the directory that the current dbt project is searching for a profiles.yml. Then, exit. This flag renders other debug step flags no-ops.",
     is_flag=True,
 )
 
@@ -171,6 +179,15 @@ use_colors_file = click.option(
     default=True,
 )
 
+log_file_max_bytes = click.option(
+    "--log-file-max-bytes",
+    envvar="DBT_LOG_FILE_MAX_BYTES",
+    help="Configure the max file size in bytes for a single dbt.log file, before rolling over. 0 means no limit.",
+    default=10 * 1024 * 1024,  # 10mb
+    type=click.INT,
+    hidden=True,
+)
+
 log_path = click.option(
     "--log-path",
     envvar="DBT_LOG_PATH",
@@ -239,6 +256,23 @@ partial_parse = click.option(
     default=True,
 )
 
+partial_parse_file_path = click.option(
+    "--partial-parse-file-path",
+    envvar="DBT_PARTIAL_PARSE_FILE_PATH",
+    help="Internal flag for path to partial_parse.manifest file.",
+    default=None,
+    hidden=True,
+    type=click.Path(exists=True, dir_okay=False, resolve_path=True),
+)
+
+partial_parse_file_diff = click.option(
+    "--partial-parse-file-diff/--no-partial-parse-file-diff",
+    envvar="DBT_PARTIAL_PARSE_FILE_DIFF",
+    help="Internal flag for whether to compute a file diff during partial parsing.",
+    hidden=True,
+    default=True,
+)
+
 populate_cache = click.option(
     "--populate-cache/--no-populate-cache",
     envvar="DBT_POPULATE_CACHE",
@@ -281,7 +315,7 @@ printer_width = click.option(
 profile = click.option(
     "--profile",
     envvar=None,
-    help="Which profile to load. Overrides setting in dbt_project.yml.",
+    help="Which existing profile to load. Overrides setting in dbt_project.yml.",
 )
 
 profiles_dir = click.option(
@@ -334,6 +368,7 @@ resource_type = click.option(
     type=ChoiceTuple(
         [
             "metric",
+            "semantic_model",
             "source",
             "analysis",
             "model",
@@ -371,9 +406,9 @@ inline = click.option(
 # Most CLI arguments should use the combined `select` option that aliases `--models` to `--select`.
 # However, if you need to split out these separators (like `dbt ls`), use the `models` and `raw_select` options instead.
 # See https://github.com/dbt-labs/dbt-core/pull/6774#issuecomment-1408476095 for more info.
-models = click.option(*model_decls, **select_attrs)
-raw_select = click.option(*select_decls, **select_attrs)
-select = click.option(*select_decls, *model_decls, **select_attrs)
+models = click.option(*model_decls, **select_attrs)  # type: ignore[arg-type]
+raw_select = click.option(*select_decls, **select_attrs)  # type: ignore[arg-type]
+select = click.option(*select_decls, *model_decls, **select_attrs)  # type: ignore[arg-type]
 
 selector = click.option(
     "--selector",
@@ -385,6 +420,13 @@ send_anonymous_usage_stats = click.option(
     "--send-anonymous-usage-stats/--no-send-anonymous-usage-stats",
     envvar="DBT_SEND_ANONYMOUS_USAGE_STATS",
     help="Send anonymous usage stats to dbt Labs.",
+    default=True,
+)
+
+clean_project_files_only = click.option(
+    "--clean-project-files-only / --no-clean-project-files-only",
+    envvar="DBT_CLEAN_PROJECT_FILES_ONLY",
+    help="If disabled, dbt clean will delete all paths specified in clean-paths, even if they're outside the dbt project.",
     default=True,
 )
 
@@ -426,12 +468,25 @@ empty_catalog = click.option(
 state = click.option(
     "--state",
     envvar="DBT_STATE",
-    help="If set, use the given directory as the source for JSON files to compare with this project.",
+    help="Unless overridden, use this state directory for both state comparison and deferral.",
     type=click.Path(
         dir_okay=True,
         file_okay=False,
         readable=True,
-        resolve_path=True,
+        resolve_path=False,
+        path_type=Path,
+    ),
+)
+
+defer_state = click.option(
+    "--defer-state",
+    envvar="DBT_DEFER_STATE",
+    help="Override the state directory for deferral only.",
+    type=click.Path(
+        dir_okay=True,
+        file_okay=False,
+        readable=True,
+        resolve_path=False,
         path_type=Path,
     ),
 )
@@ -476,6 +531,13 @@ target_path = click.option(
     envvar="DBT_TARGET_PATH",
     help="Configure the 'target-path'. Only applies this setting for the current run. Overrides the 'DBT_TARGET_PATH' if it is set.",
     type=click.Path(),
+)
+
+debug_connection = click.option(
+    "--connection",
+    envvar=None,
+    help="Test the connection to the target database independent of dependency checks.",
+    is_flag=True,
 )
 
 threads = click.option(
@@ -551,4 +613,11 @@ write_json = click.option(
     envvar="DBT_WRITE_JSON",
     help="Whether or not to write the manifest.json and run_results.json files to the target directory",
     default=True,
+)
+
+show_resource_report = click.option(
+    "--show-resource-report/--no-show-resource-report",
+    default=False,
+    envvar="DBT_SHOW_RESOURCE_REPORT",
+    hidden=True,
 )

@@ -63,7 +63,7 @@ def build_catalog_table(data) -> CatalogTable:
 
 # keys are database name, schema name, table name
 class Catalog(Dict[CatalogKey, CatalogTable]):
-    def __init__(self, columns: List[PrimitiveDict]):
+    def __init__(self, columns: List[PrimitiveDict]) -> None:
         super().__init__()
         for col in columns:
             self.add_column(col)
@@ -214,10 +214,12 @@ class GenerateTask(CompileTask):
                     compile_results=compile_results,
                 )
 
-        shutil.copyfile(DOCS_INDEX_FILE_PATH, os.path.join(self.config.target_path, "index.html"))
+        shutil.copyfile(
+            DOCS_INDEX_FILE_PATH, os.path.join(self.config.project_target_path, "index.html")
+        )
 
         for asset_path in self.config.asset_paths:
-            to_asset_path = os.path.join(self.config.target_path, asset_path)
+            to_asset_path = os.path.join(self.config.project_target_path, asset_path)
 
             if os.path.exists(to_asset_path):
                 shutil.rmtree(to_asset_path)
@@ -257,10 +259,10 @@ class GenerateTask(CompileTask):
             errors=errors,
         )
 
-        path = os.path.join(self.config.target_path, CATALOG_FILENAME)
+        path = os.path.join(self.config.project_target_path, CATALOG_FILENAME)
         results.write(path)
         if self.args.compile:
-            write_manifest(self.manifest, self.config.target_path)
+            write_manifest(self.manifest, self.config.project_target_path)
 
         if exceptions:
             fire_event(WriteCatalogFailure(num_exceptions=len(exceptions)))

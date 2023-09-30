@@ -43,7 +43,7 @@ from dbt.exceptions import (
     UnexpectedNullError,
 )
 
-from dbt.adapters.protocol import AdapterConfig, ConnectionManagerProtocol
+from dbt.adapters.protocol import AdapterConfig
 from dbt.clients.agate_helper import empty_table, merge_tables, table_from_rows
 from dbt.clients.jinja import MacroGenerator
 from dbt.contracts.graph.manifest import Manifest, MacroManifest
@@ -60,7 +60,7 @@ from dbt.events.types import (
 )
 from dbt.utils import filter_null_values, executor, cast_to_str, AttrDict
 
-from dbt.adapters.base.connections import Connection, AdapterResponse
+from dbt.adapters.base.connections import Connection, AdapterResponse, BaseConnectionManager
 from dbt.adapters.base.meta import AdapterMeta, available
 from dbt.adapters.base.relation import (
     ComponentName,
@@ -74,6 +74,7 @@ from dbt.adapters.cache import RelationsCache, _make_ref_key_dict
 from dbt import deprecations
 
 GET_CATALOG_MACRO_NAME = "get_catalog"
+GET_CATALOG_RELATIONS_MACRO_NAME = "get_catalog_relations"
 FRESHNESS_MACRO_NAME = "collect_freshness"
 
 
@@ -161,6 +162,14 @@ class PythonJobHelper:
         raise NotImplementedError("PythonJobHelper submit function is not implemented yet")
 
 
+class AdapterFeature(str, Enum):
+    """Enumeration of optional adapter features which can be probed using BaseAdapter.has_feature()"""
+
+    CatalogByRelations = "CatalogByRelations"
+    """Flags support for retrieving catalog information using a list of relations, rather than always retrieving all
+    the relations in a schema """
+
+
 class BaseAdapter(metaclass=AdapterMeta):
     """The BaseAdapter provides an abstract base class for adapters.
 
@@ -208,7 +217,7 @@ class BaseAdapter(metaclass=AdapterMeta):
 
     Relation: Type[BaseRelation] = BaseRelation
     Column: Type[BaseColumn] = BaseColumn
-    ConnectionManager: Type[ConnectionManagerProtocol]
+    ConnectionManager: Type[BaseConnectionManager]
 
     # A set of clobber config fields accepted by this adapter
     # for use in materializations
@@ -222,7 +231,7 @@ class BaseAdapter(metaclass=AdapterMeta):
         ConstraintType.foreign_key: ConstraintSupport.ENFORCED,
     }
 
-    def __init__(self, config):
+    def __init__(self, config) -> None:
         self.config = config
         self.cache = RelationsCache()
         self.connections = self.ConnectionManager(config)
@@ -289,6 +298,17 @@ class BaseAdapter(metaclass=AdapterMeta):
         """
         return self.connections.execute(sql=sql, auto_begin=auto_begin, fetch=fetch, limit=limit)
 
+    def validate_sql(self, sql: str) -> AdapterResponse:
+        """Submit the given SQL to the engine for validation, but not execution.
+
+        This should throw an appropriate exception if the input SQL is invalid, although
+        in practice that will generally be handled by delegating to an existing method
+        for execution and allowing the error handler to take care of the rest.
+
+        :param str sql: The sql to validate
+        """
+        raise NotImplementedError("`validate_sql` is not implemented for this adapter!")
+
     @available.parse(lambda *a, **k: [])
     def get_column_schema_from_query(self, sql: str) -> List[BaseColumn]:
         """Get a list of the Columns with names and data types from the given sql."""
@@ -304,14 +324,21 @@ class BaseAdapter(metaclass=AdapterMeta):
 
     @available.parse(lambda *a, **k: ("", empty_table()))
     def get_partitions_metadata(self, table: str) -> Tuple[agate.Table]:
-        """Obtain partitions metadata for a BigQuery partitioned table.
+        """
+        TODO: Can we move this to dbt-bigquery?
+        Obtain partitions metadata for a BigQuery partitioned table.
 
-        :param str table_id: a partitioned table id, in standard SQL format.
+        :param str table: a partitioned table id, in standard SQL format.
         :return: a partition metadata tuple, as described in
             https://cloud.google.com/bigquery/docs/creating-partitioned-tables#getting_partition_metadata_using_meta_tables.
         :rtype: agate.Table
         """
-        return self.connections.get_partitions_metadata(table=table)
+        if hasattr(self.connections, "get_partitions_metadata"):
+            return self.connections.get_partitions_metadata(table=table)
+        else:
+            raise NotImplementedError(
+                "`get_partitions_metadata` is not implemented for this adapter!"
+            )
 
     ###
     # Methods that should never be overridden
@@ -384,7 +411,7 @@ class BaseAdapter(metaclass=AdapterMeta):
         return {
             self.Relation.create_from(self.config, node).without_identifier()
             for node in manifest.nodes.values()
-            if (node.is_relational and not node.is_ephemeral_model)
+            if (node.is_relational and not node.is_ephemeral_model and not node.is_external_node)
         }
 
     def _get_catalog_schemas(self, manifest: Manifest) -> SchemaSearchMap:
@@ -397,6 +424,29 @@ class BaseAdapter(metaclass=AdapterMeta):
         lowercase strings.
         """
         info_schema_name_map = SchemaSearchMap()
+        relations = self._get_catalog_relations(manifest)
+        for relation in relations:
+            info_schema_name_map.add(relation)
+        # result is a map whose keys are information_schema Relations without
+        # identifiers that have appropriate database prefixes, and whose values
+        # are sets of lowercase schema names that are valid members of those
+        # databases
+        return info_schema_name_map
+
+    def _get_catalog_relations_by_info_schema(
+        self, manifest: Manifest
+    ) -> Dict[InformationSchema, List[BaseRelation]]:
+        relations = self._get_catalog_relations(manifest)
+        relations_by_info_schema: Dict[InformationSchema, List[BaseRelation]] = dict()
+        for relation in relations:
+            info_schema = relation.information_schema_only()
+            if info_schema not in relations_by_info_schema:
+                relations_by_info_schema[info_schema] = []
+            relations_by_info_schema[info_schema].append(relation)
+
+        return relations_by_info_schema
+
+    def _get_catalog_relations(self, manifest: Manifest) -> List[BaseRelation]:
         nodes: Iterator[ResultNode] = chain(
             [
                 node
@@ -405,17 +455,12 @@ class BaseAdapter(metaclass=AdapterMeta):
             ],
             manifest.sources.values(),
         )
-        for node in nodes:
-            relation = self.Relation.create_from(self.config, node)
-            info_schema_name_map.add(relation)
-        # result is a map whose keys are information_schema Relations without
-        # identifiers that have appropriate database prefixes, and whose values
-        # are sets of lowercase schema names that are valid members of those
-        # databases
-        return info_schema_name_map
+
+        relations = [self.Relation.create_from(self.config, n) for n in nodes]
+        return relations
 
     def _relations_cache_for_schemas(
-        self, manifest: Manifest, cache_schemas: Set[BaseRelation] = None
+        self, manifest: Manifest, cache_schemas: Optional[Set[BaseRelation]] = None
     ) -> None:
         """Populate the relations cache for the given schemas. Returns an
         iterable of the schemas populated, as strings.
@@ -442,16 +487,17 @@ class BaseAdapter(metaclass=AdapterMeta):
         # it's possible that there were no relations in some schemas. We want
         # to insert the schemas we query into the cache's `.schemas` attribute
         # so we can check it later
-        cache_update: Set[Tuple[Optional[str], Optional[str]]] = set()
+        cache_update: Set[Tuple[Optional[str], str]] = set()
         for relation in cache_schemas:
-            cache_update.add((relation.database, relation.schema))
+            if relation.schema:
+                cache_update.add((relation.database, relation.schema))
         self.cache.update_schemas(cache_update)
 
     def set_relations_cache(
         self,
         manifest: Manifest,
         clear: bool = False,
-        required_schemas: Set[BaseRelation] = None,
+        required_schemas: Optional[Set[BaseRelation]] = None,
     ) -> None:
         """Run a query that gets a populated cache of the relations in the
         database and set the cache on this adapter.
@@ -785,7 +831,6 @@ class BaseAdapter(metaclass=AdapterMeta):
         schema: str,
         identifier: str,
     ) -> List[BaseRelation]:
-
         matches = []
 
         search = self._make_match_kwargs(database, schema, identifier)
@@ -986,7 +1031,7 @@ class BaseAdapter(metaclass=AdapterMeta):
         manifest: Optional[Manifest] = None,
         project: Optional[str] = None,
         context_override: Optional[Dict[str, Any]] = None,
-        kwargs: Dict[str, Any] = None,
+        kwargs: Optional[Dict[str, Any]] = None,
         text_only_columns: Optional[Iterable[str]] = None,
     ) -> AttrDict:
         """Look macro_name up in the manifest and execute its results.
@@ -1063,7 +1108,6 @@ class BaseAdapter(metaclass=AdapterMeta):
         schemas: Set[str],
         manifest: Manifest,
     ) -> agate.Table:
-
         kwargs = {"information_schema": information_schema, "schemas": schemas}
         table = self.execute_macro(
             GET_CATALOG_MACRO_NAME,
@@ -1076,20 +1120,57 @@ class BaseAdapter(metaclass=AdapterMeta):
         results = self._catalog_filter_table(table, manifest)  # type: ignore[arg-type]
         return results
 
+    def _get_one_catalog_by_relations(
+        self,
+        information_schema: InformationSchema,
+        relations: List[BaseRelation],
+        manifest: Manifest,
+    ) -> agate.Table:
+
+        kwargs = {
+            "information_schema": information_schema,
+            "relations": relations,
+        }
+        table = self.execute_macro(
+            GET_CATALOG_RELATIONS_MACRO_NAME,
+            kwargs=kwargs,
+            # pass in the full manifest, so we get any local project
+            # overrides
+            manifest=manifest,
+        )
+
+        results = self._catalog_filter_table(table, manifest)  # type: ignore[arg-type]
+        return results
+
     def get_catalog(self, manifest: Manifest) -> Tuple[agate.Table, List[Exception]]:
-        schema_map = self._get_catalog_schemas(manifest)
 
         with executor(self.config) as tpe:
             futures: List[Future[agate.Table]] = []
-            for info, schemas in schema_map.items():
-                if len(schemas) == 0:
-                    continue
-                name = ".".join([str(info.database), "information_schema"])
-
-                fut = tpe.submit_connected(
-                    self, name, self._get_one_catalog, info, schemas, manifest
-                )
-                futures.append(fut)
+            relation_count = len(self._get_catalog_relations(manifest))
+            if relation_count <= 100 and self.has_feature(AdapterFeature.CatalogByRelations):
+                relations_by_schema = self._get_catalog_relations_by_info_schema(manifest)
+                for info_schema in relations_by_schema:
+                    name = ".".join([str(info_schema.database), "information_schema"])
+                    relations = relations_by_schema[info_schema]
+                    fut = tpe.submit_connected(
+                        self,
+                        name,
+                        self._get_one_catalog_by_relations,
+                        info_schema,
+                        relations,
+                        manifest,
+                    )
+                    futures.append(fut)
+            else:
+                schema_map: SchemaSearchMap = self._get_catalog_schemas(manifest)
+                for info, schemas in schema_map.items():
+                    if len(schemas) == 0:
+                        continue
+                    name = ".".join([str(info.database), "information_schema"])
+                    fut = tpe.submit_connected(
+                        self, name, self._get_one_catalog, info, schemas, manifest
+                    )
+                    futures.append(fut)
 
             catalogs, exceptions = catch_as_completed(futures)
 
@@ -1319,20 +1400,26 @@ class BaseAdapter(metaclass=AdapterMeta):
     def render_column_constraint(cls, constraint: ColumnLevelConstraint) -> Optional[str]:
         """Render the given constraint as DDL text. Should be overriden by adapters which need custom constraint
         rendering."""
-        if constraint.type == ConstraintType.check and constraint.expression:
-            return f"check {constraint.expression}"
+        constraint_expression = constraint.expression or ""
+
+        rendered_column_constraint = None
+        if constraint.type == ConstraintType.check and constraint_expression:
+            rendered_column_constraint = f"check ({constraint_expression})"
         elif constraint.type == ConstraintType.not_null:
-            return "not null"
+            rendered_column_constraint = f"not null {constraint_expression}"
         elif constraint.type == ConstraintType.unique:
-            return "unique"
+            rendered_column_constraint = f"unique {constraint_expression}"
         elif constraint.type == ConstraintType.primary_key:
-            return "primary key"
-        elif constraint.type == ConstraintType.foreign_key:
-            return "foreign key"
-        elif constraint.type == ConstraintType.custom and constraint.expression:
-            return constraint.expression
-        else:
-            return None
+            rendered_column_constraint = f"primary key {constraint_expression}"
+        elif constraint.type == ConstraintType.foreign_key and constraint_expression:
+            rendered_column_constraint = f"references {constraint_expression}"
+        elif constraint.type == ConstraintType.custom and constraint_expression:
+            rendered_column_constraint = constraint_expression
+
+        if rendered_column_constraint:
+            rendered_column_constraint = rendered_column_constraint.strip()
+
+        return rendered_column_constraint
 
     @available
     @classmethod
@@ -1340,7 +1427,8 @@ class BaseAdapter(metaclass=AdapterMeta):
         rendered_column_constraints = []
 
         for v in raw_columns.values():
-            rendered_column_constraint = [f"{v['name']} {v['data_type']}"]
+            col_name = cls.quote(v["name"]) if v.get("quote") else v["name"]
+            rendered_column_constraint = [f"{col_name} {v['data_type']}"]
             for con in v.get("constraints", None):
                 constraint = cls._parse_column_constraint(con)
                 c = cls.process_parsed_constraint(constraint, cls.render_column_constraint)
@@ -1399,17 +1487,26 @@ class BaseAdapter(metaclass=AdapterMeta):
         constraint_prefix = f"constraint {constraint.name} " if constraint.name else ""
         column_list = ", ".join(constraint.columns)
         if constraint.type == ConstraintType.check and constraint.expression:
-            return f"{constraint_prefix}check {constraint.expression}"
+            return f"{constraint_prefix}check ({constraint.expression})"
         elif constraint.type == ConstraintType.unique:
-            return f"{constraint_prefix}unique ({column_list})"
+            constraint_expression = f" {constraint.expression}" if constraint.expression else ""
+            return f"{constraint_prefix}unique{constraint_expression} ({column_list})"
         elif constraint.type == ConstraintType.primary_key:
-            return f"{constraint_prefix}primary key ({column_list})"
-        elif constraint.type == ConstraintType.foreign_key:
-            return f"{constraint_prefix}foreign key ({column_list})"
+            constraint_expression = f" {constraint.expression}" if constraint.expression else ""
+            return f"{constraint_prefix}primary key{constraint_expression} ({column_list})"
+        elif constraint.type == ConstraintType.foreign_key and constraint.expression:
+            return f"{constraint_prefix}foreign key ({column_list}) references {constraint.expression}"
         elif constraint.type == ConstraintType.custom and constraint.expression:
             return f"{constraint_prefix}{constraint.expression}"
         else:
             return None
+
+    @classmethod
+    def has_feature(cls, feature: AdapterFeature) -> bool:
+        # The base adapter implementation does not implement any optional
+        # features, so always return false. Adapters which wish to provide
+        # optional features will have to override this function.
+        return False
 
 
 COLUMNS_EQUAL_SQL = """
@@ -1444,7 +1541,6 @@ join diff_count using (id)
 def catch_as_completed(
     futures,  # typing: List[Future[agate.Table]]
 ) -> Tuple[agate.Table, List[Exception]]:
-
     # catalogs: agate.Table = agate.Table(rows=[])
     tables: List[agate.Table] = []
     exceptions: List[Exception] = []

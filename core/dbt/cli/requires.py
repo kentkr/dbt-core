@@ -9,12 +9,14 @@ from dbt.cli.exceptions import (
 from dbt.cli.flags import Flags
 from dbt.config import RuntimeConfig
 from dbt.config.runtime import load_project, load_profile, UnsetProfile
+from dbt.events.base_types import EventLevel
 from dbt.events.functions import fire_event, LOG_VERSION, set_invocation_id, setup_event_logger
 from dbt.events.types import (
     CommandCompleted,
     MainReportVersion,
     MainReportArgs,
     MainTrackingUserState,
+    ResourceReport,
 )
 from dbt.events.helpers import get_json_string_utcnow
 from dbt.events.types import MainEncounteredError, MainStackTrace
@@ -23,9 +25,11 @@ from dbt.parser.manifest import ManifestLoader, write_manifest
 from dbt.profiler import profiler
 from dbt.tracking import active_user, initialize_from_flags, track_run
 from dbt.utils import cast_dict_to_dict_of_strings
+from dbt.plugins import set_up_plugin_manager, get_plugin_manager
 
 from click import Context
 from functools import update_wrapper
+import importlib.util
 import time
 import traceback
 
@@ -95,6 +99,28 @@ def postflight(func):
             fire_event(MainStackTrace(stack_trace=traceback.format_exc()))
             raise ExceptionExit(e)
         finally:
+            # Fire ResourceReport, but only on systems which support the resource
+            # module. (Skip it on Windows).
+            if importlib.util.find_spec("resource") is not None:
+                import resource
+
+                rusage = resource.getrusage(resource.RUSAGE_SELF)
+                fire_event(
+                    ResourceReport(
+                        command_name=ctx.command.name,
+                        command_success=success,
+                        command_wall_clock_time=time.perf_counter() - start_func,
+                        process_user_time=rusage.ru_utime,
+                        process_kernel_time=rusage.ru_stime,
+                        process_mem_max_rss=rusage.ru_maxrss,
+                        process_in_blocks=rusage.ru_inblock,
+                        process_out_blocks=rusage.ru_oublock,
+                    ),
+                    EventLevel.INFO
+                    if "flags" in ctx.obj and ctx.obj["flags"].SHOW_RESOURCE_REPORT
+                    else None,
+                )
+
             fire_event(
                 CommandCompleted(
                     command=ctx.command_path,
@@ -159,6 +185,9 @@ def project(func):
             flags.PROJECT_DIR, flags.VERSION_CHECK, ctx.obj["profile"], flags.VARS
         )
         ctx.obj["project"] = project
+
+        # Plugins
+        set_up_plugin_manager(project_name=project.project_name)
 
         if dbt.tracking.active_user is not None:
             project_id = None if project is None else project.hashed_name()
@@ -242,12 +271,15 @@ def manifest(*args0, write=True, write_perf_info=False):
                 manifest = ManifestLoader.get_full_manifest(
                     runtime_config,
                     write_perf_info=write_perf_info,
-                    publications=ctx.obj.get("_publications"),
                 )
 
                 ctx.obj["manifest"] = manifest
                 if write and ctx.obj["flags"].write_json:
-                    write_manifest(manifest, ctx.obj["runtime_config"].target_path)
+                    write_manifest(manifest, runtime_config.project_target_path)
+                    pm = get_plugin_manager(runtime_config.project_name)
+                    plugin_artifacts = pm.get_manifest_artifacts(manifest)
+                    for path, plugin_artifact in plugin_artifacts.items():
+                        plugin_artifact.write(path)
 
             return func(*args, **kwargs)
 

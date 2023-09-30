@@ -18,6 +18,7 @@ from dbt.contracts.graph.nodes import (
     ResultNode,
     ManifestNode,
     ModelNode,
+    SemanticModel,
 )
 from dbt.contracts.graph.unparsed import UnparsedVersion
 from dbt.contracts.state import PreviousState
@@ -26,6 +27,7 @@ from dbt.exceptions import (
     DbtRuntimeError,
 )
 from dbt.node_types import NodeType
+from dbt.events.contextvars import get_project_root
 
 
 SELECTOR_GLOB = "*"
@@ -36,6 +38,7 @@ class MethodName(StrEnum):
     FQN = "fqn"
     Tag = "tag"
     Group = "group"
+    Access = "access"
     Source = "source"
     Path = "path"
     File = "file"
@@ -51,6 +54,7 @@ class MethodName(StrEnum):
     SourceStatus = "source_status"
     Wildcard = "wildcard"
     Version = "version"
+    SemanticModel = "semantic_model"
 
 
 def is_selected_node(fqn: List[str], node_selector: str, is_versioned: bool) -> bool:
@@ -59,8 +63,8 @@ def is_selected_node(fqn: List[str], node_selector: str, is_versioned: bool) -> 
         flat_node_selector = node_selector.split(".")
         if fqn[-2] == node_selector:
             return True
-        # If this is a versioned model, then the last two segments should be allowed to exactly match
-        elif fqn[-2:] == flat_node_selector[-2:]:
+        # If this is a versioned model, then the last two segments should be allowed to exactly match on either the '.' or '_' delimiter
+        elif "_".join(fqn[-2:]) == "_".join(flat_node_selector[-2:]):
             return True
     else:
         if fqn[-1] == node_selector:
@@ -101,7 +105,7 @@ SelectorTarget = Union[SourceDefinition, ManifestNode, Exposure, Metric]
 class SelectorMethod(metaclass=abc.ABCMeta):
     def __init__(
         self, manifest: Manifest, previous_state: Optional[PreviousState], arguments: List[str]
-    ):
+    ) -> None:
         self.manifest: Manifest = manifest
         self.previous_state = previous_state
         self.arguments: List[str] = arguments
@@ -142,6 +146,16 @@ class SelectorMethod(metaclass=abc.ABCMeta):
                 continue
             yield unique_id, metric
 
+    def semantic_model_nodes(
+        self, included_nodes: Set[UniqueId]
+    ) -> Iterator[Tuple[UniqueId, SemanticModel]]:
+
+        for key, semantic_model in self.manifest.semantic_models.items():
+            unique_id = UniqueId(key)
+            if unique_id not in included_nodes:
+                continue
+            yield unique_id, semantic_model
+
     def all_nodes(
         self, included_nodes: Set[UniqueId]
     ) -> Iterator[Tuple[UniqueId, SelectorTarget]]:
@@ -150,6 +164,7 @@ class SelectorMethod(metaclass=abc.ABCMeta):
             self.source_nodes(included_nodes),
             self.exposure_nodes(included_nodes),
             self.metric_nodes(included_nodes),
+            self.semantic_model_nodes(included_nodes),
         )
 
     def configurable_nodes(
@@ -165,6 +180,7 @@ class SelectorMethod(metaclass=abc.ABCMeta):
             self.parsed_nodes(included_nodes),
             self.exposure_nodes(included_nodes),
             self.metric_nodes(included_nodes),
+            self.semantic_model_nodes(included_nodes),
         )
 
     def groupable_nodes(
@@ -208,8 +224,8 @@ class QualifiedNameSelectorMethod(SelectorMethod):
 
         :param str selector: The selector or node name
         """
-        parsed_nodes = list(self.parsed_nodes(included_nodes))
-        for node, real_node in parsed_nodes:
+        non_source_nodes = list(self.non_source_nodes(included_nodes))
+        for node, real_node in non_source_nodes:
             if self.node_is_match(selector, real_node.fqn, real_node.is_versioned):
                 yield node
 
@@ -218,7 +234,9 @@ class TagSelectorMethod(SelectorMethod):
     def search(self, included_nodes: Set[UniqueId], selector: str) -> Iterator[UniqueId]:
         """yields nodes from included that have the specified tag"""
         for node, real_node in self.all_nodes(included_nodes):
-            if any(fnmatch(tag, selector) for tag in real_node.tags):
+            if hasattr(real_node, "tags") and any(
+                fnmatch(tag, selector) for tag in real_node.tags
+            ):
                 yield node
 
 
@@ -227,6 +245,16 @@ class GroupSelectorMethod(SelectorMethod):
         """yields nodes from included in the specified group"""
         for node, real_node in self.groupable_nodes(included_nodes):
             if selector == real_node.config.get("group"):
+                yield node
+
+
+class AccessSelectorMethod(SelectorMethod):
+    def search(self, included_nodes: Set[UniqueId], selector: str) -> Iterator[UniqueId]:
+        """yields model nodes matching the specified access level"""
+        for node, real_node in self.parsed_nodes(included_nodes):
+            if not isinstance(real_node, ModelNode):
+                continue
+            if selector == real_node.access:
                 yield node
 
 
@@ -310,11 +338,40 @@ class MetricSelectorMethod(SelectorMethod):
             yield node
 
 
+class SemanticModelSelectorMethod(SelectorMethod):
+    def search(self, included_nodes: Set[UniqueId], selector: str) -> Iterator[UniqueId]:
+        parts = selector.split(".")
+        target_package = SELECTOR_GLOB
+        if len(parts) == 1:
+            target_name = parts[0]
+        elif len(parts) == 2:
+            target_package, target_name = parts
+        else:
+            msg = (
+                'Invalid semantic model selector value "{}". Semantic models must be of '
+                "the form ${{semantic_model_name}} or "
+                "${{semantic_model_package.semantic_model_name}}"
+            ).format(selector)
+            raise DbtRuntimeError(msg)
+
+        for node, real_node in self.semantic_model_nodes(included_nodes):
+            if not fnmatch(real_node.package_name, target_package):
+                continue
+            if not fnmatch(real_node.name, target_name):
+                continue
+
+            yield node
+
+
 class PathSelectorMethod(SelectorMethod):
     def search(self, included_nodes: Set[UniqueId], selector: str) -> Iterator[UniqueId]:
         """Yields nodes from included that match the given path."""
-        # use '.' and not 'root' for easy comparison
-        root = Path.cwd()
+        # get project root from contextvar
+        project_root = get_project_root()
+        if project_root:
+            root = Path(project_root)
+        else:
+            root = Path.cwd()
         paths = set(p.relative_to(root) for p in root.glob(selector))
         for node, real_node in self.all_nodes(included_nodes):
             ofp = Path(real_node.original_file_path)
@@ -334,6 +391,8 @@ class FileSelectorMethod(SelectorMethod):
         """Yields nodes from included that match the given file name."""
         for node, real_node in self.all_nodes(included_nodes):
             if fnmatch(Path(real_node.original_file_path).name, selector):
+                yield node
+            elif fnmatch(Path(real_node.original_file_path).stem, selector):
                 yield node
 
 
@@ -413,12 +472,14 @@ class ResourceTypeSelectorMethod(SelectorMethod):
             resource_type = NodeType(selector)
         except ValueError as exc:
             raise DbtRuntimeError(f'Invalid resource_type selector "{selector}"') from exc
-        for node, real_node in self.parsed_nodes(included_nodes):
+        for node, real_node in self.all_nodes(included_nodes):
             if real_node.resource_type == resource_type:
                 yield node
 
 
 class TestNameSelectorMethod(SelectorMethod):
+    __test__ = False
+
     def search(self, included_nodes: Set[UniqueId], selector: str) -> Iterator[UniqueId]:
         for node, real_node in self.parsed_nodes(included_nodes):
             if real_node.resource_type == NodeType.Test and hasattr(real_node, "test_metadata"):
@@ -427,6 +488,8 @@ class TestNameSelectorMethod(SelectorMethod):
 
 
 class TestTypeSelectorMethod(SelectorMethod):
+    __test__ = False
+
     def search(self, included_nodes: Set[UniqueId], selector: str) -> Iterator[UniqueId]:
         search_type: Type
         # continue supporting 'schema' + 'data' for backwards compatibility
@@ -445,7 +508,7 @@ class TestTypeSelectorMethod(SelectorMethod):
 
 
 class StateSelectorMethod(SelectorMethod):
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self.modified_macros: Optional[List[str]] = None
 
@@ -517,7 +580,7 @@ class StateSelectorMethod(SelectorMethod):
     def check_modified_content(
         self, old: Optional[SelectorTarget], new: SelectorTarget, adapter_type: str
     ) -> bool:
-        if isinstance(new, (SourceDefinition, Exposure, Metric)):
+        if isinstance(new, (SourceDefinition, Exposure, Metric, SemanticModel)):
             # these all overwrite `same_contents`
             different_contents = not new.same_contents(old)  # type: ignore
         else:
@@ -525,6 +588,11 @@ class StateSelectorMethod(SelectorMethod):
 
         upstream_macro_change = self.check_macros_modified(new)
         return different_contents or upstream_macro_change
+
+    def check_unmodified_content(
+        self, old: Optional[SelectorTarget], new: SelectorTarget, adapter_type: str
+    ) -> bool:
+        return not self.check_modified_content(old, new, adapter_type)
 
     def check_modified_macros(self, old, new: SelectorTarget) -> bool:
         return self.check_macros_modified(new)
@@ -570,8 +638,10 @@ class StateSelectorMethod(SelectorMethod):
         state_checks = {
             # it's new if there is no old version
             "new": lambda old, new: old is None,
+            "old": lambda old, new: old is not None,
             # use methods defined above to compare properties of old + new
             "modified": self.check_modified_content,
+            "unmodified": self.check_unmodified_content,
             "modified.body": self.check_modified_factory("same_body"),
             "modified.configs": self.check_modified_factory("same_config"),
             "modified.persisted_descriptions": self.check_modified_factory(
@@ -603,7 +673,11 @@ class StateSelectorMethod(SelectorMethod):
                 previous_node = manifest.metrics[node]
 
             keyword_args = {}
-            if checker.__name__ in ["same_contract", "check_modified_content"]:
+            if checker.__name__ in [
+                "same_contract",
+                "check_modified_content",
+                "check_unmodified_content",
+            ]:
                 keyword_args["adapter_type"] = adapter_type  # type: ignore
 
             if checker(previous_node, real_node, **keyword_args):  # type: ignore
@@ -713,6 +787,7 @@ class MethodManager:
         MethodName.FQN: QualifiedNameSelectorMethod,
         MethodName.Tag: TagSelectorMethod,
         MethodName.Group: GroupSelectorMethod,
+        MethodName.Access: AccessSelectorMethod,
         MethodName.Source: SourceSelectorMethod,
         MethodName.Path: PathSelectorMethod,
         MethodName.File: FileSelectorMethod,
@@ -727,13 +802,14 @@ class MethodManager:
         MethodName.Result: ResultSelectorMethod,
         MethodName.SourceStatus: SourceStatusSelectorMethod,
         MethodName.Version: VersionSelectorMethod,
+        MethodName.SemanticModel: SemanticModelSelectorMethod,
     }
 
     def __init__(
         self,
         manifest: Manifest,
         previous_state: Optional[PreviousState],
-    ):
+    ) -> None:
         self.manifest = manifest
         self.previous_state = previous_state
 

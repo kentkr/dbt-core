@@ -17,15 +17,18 @@
 {% endmacro %}
 
 
-{% macro get_empty_subquery_sql(select_sql) -%}
-  {{ return(adapter.dispatch('get_empty_subquery_sql', 'dbt')(select_sql)) }}
+{% macro get_empty_subquery_sql(select_sql, select_sql_header=none) -%}
+  {{ return(adapter.dispatch('get_empty_subquery_sql', 'dbt')(select_sql, select_sql_header)) }}
 {% endmacro %}
 
 {#
   Builds a query that results in the same schema as the given select_sql statement, without necessitating a data scan.
   Useful for running a query in a 'pre-flight' context, such as model contract enforcement (assert_columns_equivalent macro).
 #}
-{% macro default__get_empty_subquery_sql(select_sql) %}
+{% macro default__get_empty_subquery_sql(select_sql, select_sql_header=none) %}
+    {%- if select_sql_header is not none -%}
+    {{ select_sql_header }}
+    {%- endif -%}
     select * from (
         {{ select_sql }}
     ) as __dbt_sbq
@@ -33,30 +36,36 @@
     limit 0
 {% endmacro %}
 
-
 {% macro get_empty_schema_sql(columns) -%}
   {{ return(adapter.dispatch('get_empty_schema_sql', 'dbt')(columns)) }}
 {% endmacro %}
 
 {% macro default__get_empty_schema_sql(columns) %}
     {%- set col_err = [] -%}
+    {%- set col_naked_numeric = [] -%}
     select
     {% for i in columns %}
       {%- set col = columns[i] -%}
       {%- if col['data_type'] is not defined -%}
-        {{ col_err.append(col['name']) }}
+        {%- do col_err.append(col['name']) -%}
+      {#-- If this column's type is just 'numeric' then it is missing precision/scale, raise a warning --#}
+      {%- elif col['data_type'].strip().lower() in ('numeric', 'decimal', 'number') -%}
+        {%- do col_naked_numeric.append(col['name']) -%}
       {%- endif -%}
-      cast(null as {{ col['data_type'] }}) as {{ col['name'] }}{{ ", " if not loop.last }}
+      {% set col_name = adapter.quote(col['name']) if col.get('quote') else col['name'] %}
+      cast(null as {{ col['data_type'] }}) as {{ col_name }}{{ ", " if not loop.last }}
     {%- endfor -%}
     {%- if (col_err | length) > 0 -%}
       {{ exceptions.column_type_missing(column_names=col_err) }}
+    {%- elif (col_naked_numeric | length) > 0 -%}
+      {{ exceptions.warn("Detected columns with numeric type and unspecified precision/scale, this can lead to unintended rounding: " ~ col_naked_numeric ~ "`") }}
     {%- endif -%}
 {% endmacro %}
 
-{% macro get_column_schema_from_query(select_sql) -%}
+{% macro get_column_schema_from_query(select_sql, select_sql_header=none) -%}
     {% set columns = [] %}
     {# -- Using an 'empty subquery' here to get the same schema as the given select_sql statement, without necessitating a data scan.#}
-    {% set sql = get_empty_subquery_sql(select_sql) %}
+    {% set sql = get_empty_subquery_sql(select_sql, select_sql_header) %}
     {% set column_schema = adapter.get_column_schema_from_query(sql) %}
     {{ return(column_schema) }}
 {% endmacro %}
