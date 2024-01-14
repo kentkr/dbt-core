@@ -36,3 +36,4 @@ types-requests<2.31.0 # types-requests 2.31.0.8 requires urllib3>=2, but we pin 
 types-setuptools
 wheel
 mocker
+pygit2==1.13.3

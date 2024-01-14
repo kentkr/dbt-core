@@ -38,6 +38,7 @@ SELECTOR_DELIMITER = ":"
 class MethodName(StrEnum):
     FQN = "fqn"
     Tag = "tag"
+    Git = "git"
     Group = "group"
     Access = "access"
     Source = "source"
@@ -246,6 +247,18 @@ class QualifiedNameSelectorMethod(SelectorMethod):
 class TagSelectorMethod(SelectorMethod):
     def search(self, included_nodes: Set[UniqueId], selector: str) -> Iterator[UniqueId]:
         """yields nodes from included that have the specified tag"""
+        for node, real_node in self.all_nodes(included_nodes):
+            if hasattr(real_node, "tags") and any(
+                fnmatch(tag, selector) for tag in real_node.tags
+            ):
+                yield node
+
+
+class GitSelectorMethod(SelectorMethod):
+    def search(self, included_nodes: Set[UniqueId], selector: str) -> Iterator[UniqueId]:
+        """yields nodes from included that have the specified tag"""
+        print(included_nodes)
+        print(selector)
         for node, real_node in self.all_nodes(included_nodes):
             if hasattr(real_node, "tags") and any(
                 fnmatch(tag, selector) for tag in real_node.tags
@@ -824,6 +837,7 @@ class MethodManager:
     SELECTOR_METHODS: Dict[MethodName, Type[SelectorMethod]] = {
         MethodName.FQN: QualifiedNameSelectorMethod,
         MethodName.Tag: TagSelectorMethod,
+        MethodName.Git: GitSelectorMethod,
         MethodName.Group: GroupSelectorMethod,
         MethodName.Access: AccessSelectorMethod,
         MethodName.Source: SourceSelectorMethod,
