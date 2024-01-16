@@ -1267,6 +1267,18 @@ class FreshnessConfigProblem(WarnLevel):
         return self.msg
 
 
+class UnusedTrailingYaml(WarnLevel):
+    def code(self) -> str:
+        return "I074"
+
+    def message(self) -> str:
+        msg = (
+            f'The test "{self.test}" for column "{self.column}" has trailing characters that will be ignored. '
+            f'If those characters are meaningful append a ":" after "{self.test.split()[0]}". '
+        )
+        return warning_tag(msg)
+
+
 # =======================================================
 # M - Deps generation
 # =======================================================

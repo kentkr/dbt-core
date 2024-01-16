@@ -1307,7 +1307,16 @@ message FreshnessConfigProblemMsg {
     FreshnessConfigProblem data = 2;
 }
 
+// I074
+message UnusedTrailingYaml {
+    string column = 1;
+    string test = 2;
+}
 
+message UnusedTrailingYamlMsg {
+    EventInfo info = 1;
+    UnusedTrailingYaml data = 2;
+}
 
 
 // M - Deps generation

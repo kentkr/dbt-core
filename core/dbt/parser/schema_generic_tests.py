@@ -3,6 +3,8 @@ import itertools
 import os
 
 from typing import List, Dict, Optional, Union, Any
+from dbt.events.functions import warn_or_error
+from dbt.events.types import UnusedTrailingYaml
 from dbt.parser.base import SimpleParser
 from dbt.parser.generic_test_builders import TestBuilder
 from dbt.parser.search import FileBlock
@@ -361,7 +363,11 @@ class SchemaGenericTestParser(SimpleParser):
         column: Optional[UnparsedColumn],
         version: Optional[NodeVersion],
     ) -> None:
+
         if isinstance(test, str):
+            # warn if test name has trailing characters which are unused
+            if len(test.split()) > 1:
+                warn_or_error(UnusedTrailingYaml(test=test))
             test = {test: {}}
 
         if column is None:
