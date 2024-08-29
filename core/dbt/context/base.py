@@ -307,7 +307,8 @@ class BaseContext(metaclass=ContextMeta):
         """The env_var() function. Return the environment variable named 'var'.
         If there is no such environment variable set, return the default.
 
-        If the default is None, raise an exception for an undefined variable.
+        The default can be None but is required. If nothing is passed in 
+        raise an exception for an undefined variable.
         """
         return_value = None
         if var.startswith(SECRET_ENV_PREFIX):
