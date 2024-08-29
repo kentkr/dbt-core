@@ -810,6 +810,7 @@ T = TypeVar("T")
 
 # Base context collection, used for parsing configs.
 class ProviderContext(ManifestContext):
+    _ENV_VAR_NOT_SET: Any = object()
     # subclasses are MacroContext, ModelContext, TestContext
     def __init__(
         self,
@@ -1380,7 +1381,7 @@ class ProviderContext(ManifestContext):
         raise CompilationError(msg)
 
     @contextmember()
-    def env_var(self, var: str, default: Optional[str] = None) -> str:
+    def env_var(self, var: str, default: Any = _ENV_VAR_NOT_SET) -> Union[str, None]:
         """The env_var() function. Return the environment variable named 'var'.
         If there is no such environment variable set, return the default.
 
@@ -1394,37 +1395,38 @@ class ProviderContext(ManifestContext):
 
         if var in env:
             return_value = env[var]
-        elif default is not None:
+        # sentinel approach allows `none` to be passed in
+        # if nothing is passed in the below error is thrown
+        elif default is self._ENV_VAR_NOT_SET:
+            raise EnvVarMissingError(var)
+        else:
             return_value = default
 
-        if return_value is not None:
-            # Save the env_var value in the manifest and the var name in the source_file.
-            # If this is compiling, do not save because it's irrelevant to parsing.
-            compiling = (
-                True
-                if hasattr(self.model, "compiled")
-                and getattr(self.model, "compiled", False) is True
-                else False
+        # Save the env_var value in the manifest and the var name in the source_file.
+        # If this is compiling, do not save because it's irrelevant to parsing.
+        compiling = (
+            True
+            if hasattr(self.model, "compiled")
+            and getattr(self.model, "compiled", False) is True
+            else False
+        )
+        if self.model and not compiling:
+            # If the environment variable is set from a default, store a string indicating
+            # that so we can skip partial parsing.  Otherwise the file will be scheduled for
+            # reparsing. If the default changes, the file will have been updated and therefore
+            # will be scheduled for reparsing anyways.
+            self.manifest.env_vars[var] = (
+                return_value if var in env else DEFAULT_ENV_PLACEHOLDER
             )
-            if self.model and not compiling:
-                # If the environment variable is set from a default, store a string indicating
-                # that so we can skip partial parsing.  Otherwise the file will be scheduled for
-                # reparsing. If the default changes, the file will have been updated and therefore
-                # will be scheduled for reparsing anyways.
-                self.manifest.env_vars[var] = (
-                    return_value if var in env else DEFAULT_ENV_PLACEHOLDER
-                )
 
-                # hooks come from dbt_project.yml which doesn't have a real file_id
-                if self.model.file_id in self.manifest.files:
-                    source_file = self.manifest.files[self.model.file_id]
-                    # Schema files should never get here
-                    if source_file.parse_file_type != "schema":
-                        # TODO CT-211
-                        source_file.env_vars.append(var)  # type: ignore[union-attr]
-            return return_value
-        else:
-            raise EnvVarMissingError(var)
+            # hooks come from dbt_project.yml which doesn't have a real file_id
+            if self.model.file_id in self.manifest.files:
+                source_file = self.manifest.files[self.model.file_id]
+                # Schema files should never get here
+                if source_file.parse_file_type != "schema":
+                    # TODO CT-211
+                    source_file.env_vars.append(var)  # type: ignore[union-attr]
+        return return_value
 
     @contextproperty()
     def selected_resources(self) -> List[str]:
