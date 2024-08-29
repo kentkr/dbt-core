@@ -11,6 +11,7 @@ from .base import BaseContext, contextmember
 class SecretContext(BaseContext):
     """This context is used in profiles.yml + packages.yml. It can render secret
     env vars that aren't usable elsewhere"""
+
     _ENV_VAR_NOT_SET = object()
 
     @contextmember()
@@ -18,7 +19,7 @@ class SecretContext(BaseContext):
         """The env_var() function. Return the environment variable named 'var'.
         If there is no such environment variable set, return the default.
 
-        The default can be None but is required. If nothing is passed in 
+        The default can be None but is required. If nothing is passed in
         raise an exception for an undefined variable.
 
         In this context *only*, env_var will accept env vars prefixed with DBT_ENV_SECRET_.

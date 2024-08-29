@@ -75,6 +75,7 @@ class SchemaYamlVars:
 
 class SchemaYamlContext(ConfiguredContext):
     _ENV_VAR_NOT_SET = object()
+
     # subclass is DocsRuntimeContext
     def __init__(self, config, project_name: str, schema_yaml_vars: Optional[SchemaYamlVars]):
         super().__init__(config)
@@ -90,7 +91,7 @@ class SchemaYamlContext(ConfiguredContext):
         """The env_var() function. Return the environment variable named 'var'.
         If there is no such environment variable set, return the default.
 
-        The default can be None but is required. If nothing is passed in 
+        The default can be None but is required. If nothing is passed in
         raise an exception for an undefined variable.
         """
         return_value = None

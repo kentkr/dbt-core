@@ -6,7 +6,18 @@ import json
 import os
 import re
 import threading
-from typing import Any, Callable, Dict, Iterable, List, Mapping, NoReturn, Optional, Set, Union
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    Iterable,
+    List,
+    Mapping,
+    NoReturn,
+    Optional,
+    Set,
+    Union,
+)
 
 # These modules are added to the context. Consider alternative
 # approaches which will extend well to potentially many modules
@@ -307,7 +318,7 @@ class BaseContext(metaclass=ContextMeta):
         """The env_var() function. Return the environment variable named 'var'.
         If there is no such environment variable set, return the default.
 
-        The default can be None but is required. If nothing is passed in 
+        The default can be None but is required. If nothing is passed in
         raise an exception for an undefined variable.
         """
         return_value = None

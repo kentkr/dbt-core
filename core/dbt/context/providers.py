@@ -811,6 +811,7 @@ T = TypeVar("T")
 # Base context collection, used for parsing configs.
 class ProviderContext(ManifestContext):
     _ENV_VAR_NOT_SET: Any = object()
+
     # subclasses are MacroContext, ModelContext, TestContext
     def __init__(
         self,
@@ -1385,7 +1386,7 @@ class ProviderContext(ManifestContext):
         """The env_var() function. Return the environment variable named 'var'.
         If there is no such environment variable set, return the default.
 
-        The default can be None but is required. If nothing is passed in 
+        The default can be None but is required. If nothing is passed in
         raise an exception for an undefined variable.
         """
         return_value = None
@@ -1407,8 +1408,7 @@ class ProviderContext(ManifestContext):
         # If this is compiling, do not save because it's irrelevant to parsing.
         compiling = (
             True
-            if hasattr(self.model, "compiled")
-            and getattr(self.model, "compiled", False) is True
+            if hasattr(self.model, "compiled") and getattr(self.model, "compiled", False) is True
             else False
         )
         if self.model and not compiling:
@@ -1416,9 +1416,7 @@ class ProviderContext(ManifestContext):
             # that so we can skip partial parsing.  Otherwise the file will be scheduled for
             # reparsing. If the default changes, the file will have been updated and therefore
             # will be scheduled for reparsing anyways.
-            self.manifest.env_vars[var] = (
-                return_value if var in env else DEFAULT_ENV_PLACEHOLDER
-            )
+            self.manifest.env_vars[var] = return_value if var in env else DEFAULT_ENV_PLACEHOLDER
 
             # hooks come from dbt_project.yml which doesn't have a real file_id
             if self.model.file_id in self.manifest.files:
@@ -1589,7 +1587,7 @@ class UnitTestContext(ModelContext):
 
         If there is no such environment variable set, return the default.
 
-        The default can be None but is required. If nothing is passed in 
+        The default can be None but is required. If nothing is passed in
         raise an exception for an undefined variable.
         """
         if self.model.overrides and var in self.model.overrides.env_vars:
@@ -1813,6 +1811,7 @@ def generate_parse_semantic_models(
 # the TestMacroNamespace
 class TestContext(ProviderContext):
     _ENV_VAR_NOT_SET = object()
+
     def __init__(
         self,
         model,
@@ -1882,9 +1881,7 @@ class TestContext(ProviderContext):
             # that so we can skip partial parsing.  Otherwise the file will be scheduled for
             # reparsing. If the default changes, the file will have been updated and therefore
             # will be scheduled for reparsing anyways.
-            self.manifest.env_vars[var] = (
-                return_value if var in env else DEFAULT_ENV_PLACEHOLDER
-            )
+            self.manifest.env_vars[var] = return_value if var in env else DEFAULT_ENV_PLACEHOLDER
             # the "model" should only be test nodes, but just in case, check
             # TODO CT-211
             if self.model.resource_type == NodeType.Test and self.model.file_key_name:  # type: ignore[union-attr] # noqa
